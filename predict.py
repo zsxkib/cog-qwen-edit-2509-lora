@@ -31,10 +31,6 @@ from qwenimage.pipeline_qwenimage_edit_plus import QwenImageEditPlusPipeline
 from qwenimage.qwen_fa3_processor import QwenDoubleStreamAttnProcessorFA3
 from qwenimage.transformer_qwenimage import QwenImageTransformer2DModel
 
-DEFAULT_LORA_SOURCE = "dx8152/Qwen-Edit-2509-Multiple-angles"
-DEFAULT_LORA_FILENAME = "镜头转换.safetensors"
-DEFAULT_LORA_SCALE = 1.25
-
 CONVERSION_VERSION = "v2"
 
 ASPECT_RATIOS = {
@@ -216,11 +212,7 @@ class Predictor(BasePredictor):
         self._workspace = FsPath(__file__).resolve().parent
         self._lora_loader = LoRALoader(self._workspace)
 
-        self._default_adapter_name = "multi_angle"
         self._custom_adapter_name = "custom_lora"
-        self._default_lora_id = DEFAULT_LORA_SOURCE
-        self._default_lora_filename = DEFAULT_LORA_FILENAME
-        self._default_lora_scale = DEFAULT_LORA_SCALE
 
     def setup(self) -> None:
         """Load the model and fast-path optimisations into memory."""
@@ -249,20 +241,6 @@ class Predictor(BasePredictor):
         # Match the Hugging Face space upgrades (FA3 attention + fused transformer class).
         pipe.transformer.__class__ = QwenImageTransformer2DModel
         pipe.transformer.set_attn_processor(QwenDoubleStreamAttnProcessorFA3())
-
-        self._default_lora_path = self._lora_loader.prepare(
-            self._default_lora_id,
-            self._default_lora_filename,
-        )
-        self._lora_loader.ensure_loaded(
-            pipe,
-            self._default_adapter_name,
-            self._default_lora_path,
-        )
-        pipe.set_adapters(
-            [self._default_adapter_name],
-            adapter_weights=[self._default_lora_scale],
-        )
 
         try:
             optimize_pipeline_(
@@ -474,28 +452,14 @@ class Predictor(BasePredictor):
     def _activate_lora(self, source: str, scale: float) -> str:
         """Load and activate the requested LoRA, returning the adapter name."""
         effective_source = source.strip() if source else ""
-        if not effective_source:
-            effective_source = self._default_lora_id
-
         transformer_adapters = self.pipe.get_list_adapters() or {}
         transformer_names = transformer_adapters.get("transformer", [])
 
-        if effective_source == self._default_lora_id:
-            # Ensure default adapter is loaded once.
-            self._lora_loader.ensure_loaded(
-                self.pipe,
-                self._default_adapter_name,
-                self._default_lora_path,
-            )
+        if not effective_source:
+            self.pipe.disable_lora()
             if self._custom_adapter_name in transformer_names:
                 self.pipe.delete_adapters(self._custom_adapter_name)
-
-            self.pipe.disable_lora()
-            self.pipe.set_adapters(
-                [self._default_adapter_name],
-                adapter_weights=[float(scale)],
-            )
-            return self._default_adapter_name
+            return "base"
 
         custom_path = self._resolve_custom_lora(effective_source)
         self._lora_loader.ensure_loaded(
@@ -511,14 +475,10 @@ class Predictor(BasePredictor):
         return self._custom_adapter_name
 
     def _restore_default_lora(self) -> None:
-        """Reset the pipeline to the default multi-angle LoRA."""
+        """Disable any custom LoRA adapters."""
         self.pipe.disable_lora()
-        self.pipe.set_adapters(
-            [self._default_adapter_name],
-            adapter_weights=[self._default_lora_scale],
-        )
-        transformer_adapters = self.pipe.get_list_adapters() or {}
-        if self._custom_adapter_name in transformer_adapters.get("transformer", []):
+        adapters = self.pipe.get_list_adapters() or {}
+        if self._custom_adapter_name in adapters.get("transformer", []):
             try:
                 self.pipe.delete_adapters(self._custom_adapter_name)
             except Exception as exc:  # pragma: no cover - defensive cleanup
@@ -634,16 +594,16 @@ class Predictor(BasePredictor):
         ),
         lora_weights: str = Input(
             description=(
-                "LoRA weights to apply. Pass a Hugging Face repo slug like "
-                "'dx8152/Qwen-Edit-2509-Multiple-angles' or a direct .safetensors/zip/tar URL "
-                "(for example, 'https://huggingface.co/flymy-ai/qwen-image-lora/resolve/main/pytorch_lora_weights.safetensors', "
-                "'https://example.com/lora_weights.tar.gz', or 'https://example.com/lora_weights.zip')."
+                "LoRA weights to apply. Pass a Hugging Face repo slug "
+                "(for example 'owner/model') or a direct .safetensors/zip/tar URL "
+                "such as 'https://huggingface.co/flymy-ai/qwen-image-lora/resolve/main/pytorch_lora_weights.safetensors'. "
+                "Leave blank to run without a LoRA."
             ),
-            default=DEFAULT_LORA_SOURCE,
+            default="",
         ),
         lora_scale: float = Input(
             description="Strength applied to the selected LoRA.",
-            default=DEFAULT_LORA_SCALE,
+            default=1.25,
             ge=0.0,
             le=4.0,
         ),
@@ -731,12 +691,7 @@ class Predictor(BasePredictor):
         current_scope().record_metric("go_fast", bool(used_fast_path))
         current_scope().record_metric("image_output_count", 1)
 
-        effective_source = requested_lora or self._default_lora_id
-        should_restore = (
-            effective_source != self._default_lora_id
-            or abs(float(lora_scale) - self._default_lora_scale) > 1e-6
-        )
-        if should_restore:
+        if requested_lora:
             self._restore_default_lora()
 
         np_imgs = [np.asarray(img, dtype=np.uint8)]

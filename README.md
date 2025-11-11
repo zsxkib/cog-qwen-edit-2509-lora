@@ -1,147 +1,69 @@
-# Cog Template Repository
+# Qwen Edit 2509 – LoRA Harness
 
-This is a template repository for creating [Cog](https://github.com/replicate/cog) models that efficiently handle model weights with proper caching. It includes tools to upload model weights to Google Cloud Storage and generate download code for your `predict.py` file.
+Minimal Cog deployment for `Qwen/Qwen-Image-Edit-2509` with plug-and-play LoRA loading. It ships the same transformer, FA3 attention processor, and optional AOT optimisation used in the Hugging Face space, but leaves the LoRA choice up to the caller.
 
-[![Replicate](https://replicate.com/zsxkib/model-name/badge)](https://replicate.com/zsxkib/model-name)
+The goal is to provide a clean, auditable harness that works out-of-the-box with the base model and can optionally mount any `.safetensors` LoRA (local path, Hugging Face slug, or direct URL) without extra plumbing.
 
-## Getting Started
-
-To use this template for your own model:
-
-1. Clone this repository
-2. Modify `predict.py` with your model's implementation
-3. Update `cog.yaml` with your model's dependencies
-4. Use `cache_manager.py` to upload and manage model weights
-
-## Repository Structure
-
-- `predict.py`: The main model implementation file 
-- `cache_manager.py`: Script for uploading model weights to GCS and generating download code
-- `cog.yaml`: Cog configuration file that defines your model's environment
-
-## Managing Model Weights with cache_manager.py
-
-A key feature of this template is the `cache_manager.py` script, which helps you:
-
-1. Upload model weights to Google Cloud Storage (GCS)
-2. Generate code for downloading those weights in your `predict.py`
-3. Handle both individual files and directories efficiently
-
-### Prerequisites for Using cache_manager.py
-
-- Google Cloud SDK installed and configured (`gcloud` command)
-- Permission to upload to the specified GCS bucket (default: `gs://replicate-weights/`)
-- `tar` command available in your PATH
-
-### Basic Usage
+## Quickstart
 
 ```bash
-python cache_manager.py --model-name your-model-name --local-dirs model_cache
+pip install cog==0.16.8
+cog predict \
+  -i image=@examples/monkey.jpg \
+  -i rotate_degrees=45 \
+  -i move_forward=5 \
+  -i go_fast=true \  # uses 4 denoise steps unless you override num_inference_steps
+  -i lora_weights="owner/repo-or-https-url-if-you-have-one" \
+  -i output_format=webp \
+  -o outputs/sample.webp
 ```
 
-This will:
-1. Find files and directories in the `model_cache` directory
-2. Create tar archives of each directory
-3. Upload both individual files and tar archives to GCS
-4. Generate code snippets for downloading the weights in your `predict.py`
+- Leave `lora_weights` blank to use the base model, or supply either a Hugging Face slug (`owner/model`) or a direct `.safetensors`/`.zip`/`.tar` URL (`https://.../resolve/.../weights.safetensors`, etc.).
+- `go_fast=true` (with no `num_inference_steps`) gives you the 4-step fast preset; set `go_fast=false` or provide a `num_inference_steps` value (1–40) for slower passes.
+- `lora_scale` defaults to `1.25` but can be adjusted when you load custom weights.
 
-### Advanced Usage
+## Runtime inputs
 
-```bash
-python cache_manager.py \
-    --model-name your-model-name \
-    --local-dirs model_cache weights \
-    --gcs-base-path gs://replicate-weights/ \
-    --cdn-base-url https://weights.replicate.delivery/default/ \
-    --keep-tars
-```
+| Input | Purpose |
+|-------|---------|
+| `image` | Required source image (`cog.Path`). |
+| `prompt` | Optional free-form text appended after the auto-generated camera instruction. |
+| `rotate_degrees` | -90 → 90. Positive rotates left, negative rotates right. |
+| `move_forward` | 0 → 10. Higher values push toward a close-up. |
+| `vertical_tilt` | -1 (bird’s-eye) → 1 (worm’s-eye). |
+| `use_wide_angle` | Boolean toggle for the wide-angle instruction. |
+| `aspect_ratio` | Preset aspect ratios or `match_input_image`. |
+| `go_fast` | When `true` (default) and `num_inference_steps` is omitted, run the 4-step fast preset; set to `false` for the 40-step preset. |
+| `num_inference_steps` | Optional explicit denoise count (1–40). Overrides the presets when provided. |
+| `true_guidance_scale` | 0–10 true CFG scale passed straight to the pipeline. |
+| `lora_weights` | Optional LoRA weights. Accepts Hugging Face repo slugs (`owner/model`), `.../resolve/...` URLs, or arbitrary .safetensors/.zip/.tar URLs. |
+| `lora_scale` | Scale applied to the selected LoRA (default 1.25). |
+| `seed` | Optional RNG seed for reproducible results. |
+| `output_format`, `output_quality` | Post-processing options (`webp`/`jpg`/`png`, quality 0–100). |
+| `disable_safety_checker` | Skip NSFW checks (not recommended). |
 
-#### Parameters
+## Implementation notes
 
-- `--model-name`: Required. The name of your model (used in paths)
-- `--local-dirs`: Required. One or more local directories to process
-- `--gcs-base-path`: Optional. Base Google Cloud Storage path
-- `--cdn-base-url`: Optional. Base CDN URL
-- `--keep-tars`: Optional. Keep the generated .tar files locally after upload
+- The transformer weights come from `linoyts/Qwen-Image-Edit-Rapid-AIO` and are paired with the FA3 attention processor exactly as in the HF space.
+- The LoRA loader accepts local paths, Hugging Face slugs, or direct download links (`.safetensors`, `.zip`, `.tar.*`) and caches the converted weights for reuse.
+- After each prediction we detach any custom adapters so the next call starts from the base model unless you supply another LoRA.
+- `optimization.py` mirrors the HF AOT helper. If the runtime lacks Hugging Face’s `spaces` package the call is simply skipped.
 
-## Workflow Example
+## Repository layout
 
-1. **Develop your model locally**:
-   ```bash
-   # Run your model once to download weights to model_cache
-   cog predict -i prompt="test"
-   ```
+| Path | Description |
+|------|-------------|
+| `predict.py` | Cog predictor with camera prompt assembly, LoRA management, and safety filtering. |
+| `qwenimage/` | Local copy of the HF Qwen edit pipeline (`pipeline_qwenimage_edit_plus.py`, FA3 processor, transformer). |
+| `optimization.py` | Optional AOT compile helper (no-op outside Spaces). |
+| `cog.yaml` | Build recipe. Only installs what the predictor actually uses. |
+| `requirements.txt` | Python dependencies (diffusers, transformers, torchao, kernels, etc.). |
 
-2. **Upload model weights**:
-   ```bash
-   python cache_manager.py --model-name your-model-name --local-dirs model_cache
-   ```
+## Development tips
 
-3. **Copy the generated code snippet** into your `predict.py`
+1. Keep the Hugging Face space open while making changes; feature parity is the benchmark.
+2. When adjusting inputs, prefer tweaking bounds/descriptions over renaming keys—Replicate clients rely on stable field names.
+3. If you load additional LoRAs frequently, drop them into `custom_loras/` to skip future downloads (gitignored).
+4. For regression testing, reuse the example images bundled in the HF repo (`tool_of_the_sea.png`, `monkey.jpg`, …) together with representative camera motions.
 
-4. **Test that the model can download weights**:
-   ```bash
-   rm -rf model_cache
-   cog predict -i prompt="test"
-   ```
-
-## Example Implementation
-
-The template comes with a sample Stable Diffusion implementation in `predict.py` that demonstrates:
-
-- Setting up the model cache directory
-- Downloading weights from GCS with progress reporting
-- Setting environment variables for model caching
-- Random seed generation for reproducibility
-- Output format and quality options
-
-## Best Practices
-
-- **Environment Variables**: Set cache-related environment variables early
-  ```python
-  os.environ["HF_HOME"] = MODEL_CACHE
-  os.environ["TORCH_HOME"] = MODEL_CACHE
-  # etc.
-  ```
-
-- **Seed Management**: Provide a seed parameter and implement random seed generation
-  ```python
-  if seed is None:
-      seed = int.from_bytes(os.urandom(2), "big")
-  print(f"Using seed: {seed}")
-  ```
-
-- **Output Formats**: Support multiple output formats (webp, jpg, png) with quality controls
-  ```python
-  output_format: str = Input(
-      description="Format of the output image",
-      choices=["webp", "jpg", "png"],
-      default="webp"
-  )
-  output_quality: int = Input(
-      description="The image compression quality...",
-      ge=1, le=100, default=80
-  )
-  ```
-
-## Deploying to Replicate
-
-After setting up your model, you can push it to [Replicate](https://replicate.com):
-
-1. Create a new model on Replicate
-2. Push your model:
-   ```bash
-   cog push r8.im/username/model-name
-   ```
-
-## License
-
-MIT
-
----
-
----
-
-⭐ Star this on [GitHub](https://github.com/zsxkib/model-name)!
-
-👋 Follow `zsxkib` on [Twitter/X](https://twitter.com/zsakib_)
+Questions or follow-ups? Ping @zsakib. Happy camera moves! 🎥
