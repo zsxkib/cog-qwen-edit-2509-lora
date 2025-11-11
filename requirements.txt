@@ -1,4 +1,11 @@
-torch
 diffusers
 transformers
 accelerate
+requests
+pydantic<2.12.0
+kernels
+sentencepiece
+torchao==0.11.0
+peft
+safetensors
+torchvision
